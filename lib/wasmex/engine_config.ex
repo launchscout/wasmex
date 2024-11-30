@@ -18,12 +18,15 @@ defmodule Wasmex.EngineConfig do
 
   defstruct consume_fuel: false,
             cranelift_opt_level: :none,
-            wasm_backtrace_details: false
+            wasm_backtrace_details: false,
+            memory64: false,
+            wasm_component_model: true
 
   @type t :: %__MODULE__{
           consume_fuel: boolean(),
           cranelift_opt_level: :none | :speed | :speed_and_size,
-          wasm_backtrace_details: boolean()
+          wasm_backtrace_details: boolean(),
+          memory64: boolean()
         }
 
   @doc ~S"""
@@ -36,7 +39,7 @@ defmodule Wasmex.EngineConfig do
 
   Note that a `Wasmex.Store` starts with no fuel, so if you enable this option
   you'll have to be sure to pour some fuel into `Wasmex.Store` before
-  executing some code. See `Wasmex.StoreOrCaller.add_fuel/2`.
+  executing some code. See `Wasmex.StoreOrCaller.set_fuel/2`.
 
   ## Example
 
@@ -48,6 +51,21 @@ defmodule Wasmex.EngineConfig do
   @spec consume_fuel(t(), boolean()) :: t()
   def consume_fuel(%__MODULE__{} = config, consume_fuel) do
     %__MODULE__{config | consume_fuel: consume_fuel}
+  end
+
+  @doc ~S"""
+  Configures whether the WebAssembly memory type is 64-bit.
+
+  ## Example
+
+      iex> config = %Wasmex.EngineConfig{}
+      ...>          |> Wasmex.EngineConfig.memory64(true)
+      iex> config.memory64
+      true
+  """
+  @spec memory64(t(), boolean()) :: t()
+  def memory64(%__MODULE__{} = config, memory64) do
+    %__MODULE__{config | memory64: memory64}
   end
 
   @doc """

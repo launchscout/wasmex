@@ -1,4 +1,4 @@
-use rustler::dynamic::TermType;
+use rustler::TermType;
 
 // PrintableTermType is a workaround for rustler::dynamic::TermType not having the Debug trait.
 pub enum PrintableTermType {
@@ -12,12 +12,11 @@ impl fmt::Debug for PrintableTermType {
         match self {
             PrintTerm(TermType::Atom) => write!(f, "Atom"),
             PrintTerm(TermType::Binary) => write!(f, "Binary"),
-            PrintTerm(TermType::EmptyList) => write!(f, "EmptyList"),
-            PrintTerm(TermType::Exception) => write!(f, "Exception"),
             PrintTerm(TermType::Fun) => write!(f, "Fun"),
             PrintTerm(TermType::List) => write!(f, "List"),
             PrintTerm(TermType::Map) => write!(f, "Map"),
-            PrintTerm(TermType::Number) => write!(f, "Number"),
+            PrintTerm(TermType::Integer) => write!(f, "Integer"),
+            PrintTerm(TermType::Float) => write!(f, "Float"),
             PrintTerm(TermType::Pid) => write!(f, "Pid"),
             PrintTerm(TermType::Port) => write!(f, "Port"),
             PrintTerm(TermType::Ref) => write!(f, "Ref"),

@@ -1,23 +1,23 @@
-use std::sync::{Condvar, Mutex};
-
-use rustler::{
-    resource::ResourceArc, types::tuple, Atom, Encoder, Error, ListIterator, MapIterator, OwnedEnv,
-    Term,
-};
-use wasmtime::{Caller, FuncType, Linker, Val, ValType};
-use wiggle::anyhow::{self, anyhow};
-
 use crate::{
-    atoms::{self},
+    atoms,
     caller::{remove_caller, set_caller},
-    instance::{map_wasm_values_to_vals, WasmValue},
+    instance::{map_wasm_values_to_vals, LinkedModule, WasmValue},
     memory::MemoryResource,
     store::{StoreData, StoreOrCaller, StoreOrCallerResource},
 };
+use rustler::{
+    types::tuple, Atom, Encoder, Error, ListIterator, MapIterator, OwnedEnv, ResourceArc, Term,
+};
+use std::sync::{Condvar, Mutex};
+use wasmtime::{Caller, Engine, FuncType, Linker, Val, ValType};
+use wiggle::anyhow::{self, anyhow};
 
 pub struct CallbackTokenResource {
     pub token: CallbackToken,
 }
+
+#[rustler::resource_impl()]
+impl rustler::Resource for CallbackTokenResource {}
 
 pub struct CallbackToken {
     pub continue_signal: Condvar,
@@ -25,20 +25,52 @@ pub struct CallbackToken {
     pub return_values: Mutex<Option<(bool, Vec<WasmValue>)>>,
 }
 
-pub fn link_imports(linker: &mut Linker<StoreData>, imports: MapIterator) -> Result<(), Error> {
+pub fn link_modules(
+    linker: &mut Linker<StoreData>,
+    store: &mut StoreOrCaller,
+    linked_modules: Vec<LinkedModule>,
+) -> Result<(), Error> {
+    for linked_module in linked_modules {
+        let module_name = linked_module.name;
+        let module = linked_module.module_resource.inner.lock().map_err(|e| {
+            rustler::Error::Term(Box::new(format!(
+                "Could not unlock linked module resource as the mutex was poisoned: {e}"
+            )))
+        })?;
+
+        let instance = linker.instantiate(&mut *store, &module).map_err(|e| {
+            rustler::Error::Term(Box::new(format!(
+                "Could not instantiate linked module: {e}"
+            )))
+        })?;
+
+        linker
+            .instance(&mut *store, &module_name, instance)
+            .map_err(|err| Error::Term(Box::new(err.to_string())))?;
+    }
+
+    Ok(())
+}
+
+pub fn link_imports(
+    engine: &Engine,
+    linker: &mut Linker<StoreData>,
+    imports: MapIterator,
+) -> Result<(), Error> {
     for (namespace_name, namespace_definition) in imports {
         let namespace_name = namespace_name.decode::<String>()?;
         let definition: MapIterator = namespace_definition.decode()?;
 
         for (import_name, import) in definition {
             let import_name = import_name.decode::<String>()?;
-            link_import(linker, &namespace_name, &import_name, import)?;
+            link_import(engine, linker, &namespace_name, &import_name, import)?;
         }
     }
     Ok(())
 }
 
 fn link_import(
+    engine: &Engine,
     linker: &mut Linker<StoreData>,
     namespace_name: &str,
     import_name: &str,
@@ -47,13 +79,14 @@ fn link_import(
     let import_tuple = tuple::get_tuple(definition)?;
 
     let import_type = import_tuple
-        .get(0)
+        .first()
         .ok_or(Error::Atom("missing_import_type"))?;
     let import_type =
         Atom::from_term(*import_type).map_err(|_| Error::Atom("import type must be an atom"))?;
 
     if atoms::__fn__().eq(&import_type) {
         return link_imported_function(
+            engine,
             linker,
             namespace_name.to_string(),
             import_name.to_string(),
@@ -65,8 +98,10 @@ fn link_import(
 }
 
 // Creates a wrapper function used in a Wasm import object.
-// The `definition` term must contain a function signature matching the signature if the Wasm import.
+//
+// The `definition` term must contain a function signature matching the signature of the Wasm import.
 // Once the imported function is called during Wasm execution, the following happens:
+//
 // 1. the rust wrapper we define here is called
 // 2. it creates a callback token containing a Mutex for storing the call result and a Condvar
 // 3. the rust wrapper sends an :invoke_callback message to elixir containing the token and call params
@@ -75,6 +110,7 @@ fn link_import(
 // 6. `receive_callback_result` saves the return values in the callback tokens mutex and signals the condvar,
 //    so that the original wrapper function can continue code execution
 fn link_imported_function(
+    engine: &Engine,
     linker: &mut Linker<StoreData>,
     namespace_name: String,
     import_name: String,
@@ -101,7 +137,7 @@ fn link_imported_function(
         .map(term_to_arg_type)
         .collect::<Result<Vec<ValType>, _>>()?;
 
-    let signature = FuncType::new(params_signature, results_signature.clone());
+    let signature = FuncType::new(engine, params_signature, results_signature.clone());
     linker
         .func_new(
             &namespace_name.clone(),
@@ -126,7 +162,7 @@ fn link_imported_function(
                 let caller_token = set_caller(caller);
 
                 let mut msg_env = OwnedEnv::new();
-                msg_env.send_and_clear(&pid.clone(), |env| {
+                let result = msg_env.send_and_clear(&pid.clone(), |env| {
                     let mut callback_params: Vec<Term> = Vec::with_capacity(params.len());
                     for value in params {
                         callback_params.push(match value {
@@ -134,15 +170,15 @@ fn link_imported_function(
                             Val::I64(i) => i.encode(env),
                             Val::F32(i) => f32::from_bits(*i).encode(env),
                             Val::F64(i) => f64::from_bits(*i).encode(env),
-                            // encoding V128 is not yet supported by rustler
-                            Val::V128(_) => {
-                                (atoms::error(), "unable_to_convert_v128_type").encode(env)
-                            }
+                            Val::V128(i) => i.as_u128().encode(env),
                             Val::ExternRef(_) => {
                                 (atoms::error(), "unable_to_convert_extern_ref_type").encode(env)
                             }
                             Val::FuncRef(_) => {
                                 (atoms::error(), "unable_to_convert_func_ref_type").encode(env)
+                            }
+                            Val::AnyRef(_) => {
+                                (atoms::error(), "unable_to_convert_any_ref_type").encode(env)
                             }
                         })
                     }
@@ -182,6 +218,8 @@ fn link_imported_function(
                     )
                         .encode(env)
                 });
+
+                result.expect("expect no send error");
 
                 // Wait for the thread to start up - `receive_callback_result` is responsible for that.
                 let mut result = callback_token.token.return_values.lock().unwrap();

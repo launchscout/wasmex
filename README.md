@@ -25,7 +25,7 @@ dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:wasmex, "~> 0.8.3"}
+    {:wasmex, "~> 0.9.2"}
   ]
 end
 ```
@@ -87,7 +87,7 @@ To set up a development environment install [the latest stable rust](https://www
 rustup component add rustfmt
 rustup component add clippy
 rustup target add wasm32-unknown-unknown # to compile our example Wasm files for testing
-rustup target add wasm32-wasi # to compile our example Wasm/WASI files for testing
+rustup target add wasm32-wasip1 # to compile our example Wasm/WASI files for testing
 ```
 
 Then install the erlang/elixir dependencies:
@@ -102,26 +102,7 @@ If you plan to change something on the Rust part of this project, set the follow
 I´m looking forward to your contributions. Please open a PR containing the motivation of your change. If it is a bigger change or refactoring, consider creating an issue first. We can discuss changes there first which might safe us time down the road :)
 
 Any changes should be covered by tests, they can be run with `mix test`.
-In addition to tests, we expect the formatters and linters (`cargo fmt`, `cargo clippy`, `mix format`, `mix dialyzer`, `mix credo`) to pass.
-
-### Release
-
-To release this package, make sure CI is green, increase the package version, and:
-
-```
-git tag -a v0.8.0 # change version accordingly, copy changelog into tag message
-git push --tags
-mix rustler_precompiled.download Wasmex.Native --all --ignore-unavailable --print
-```
-
-Inspect it's output carefully, but ignore NIF version `2.14` and `arm-unknown-linux-gnueabihf` arch errors because we don't build for them.
-Now inspect the checksum-Elixir.Wasmex.Native.exs file - it should include all prebuilt binaries in their checksums
-
-Then continue with
-
-```
-mix hex.publish
-```
+In addition to tests, we expect the formatters and linters (`cargo fmt`, `cargo clippy`, `mix format`, `mix credo`) to pass.
 
 ## License
 

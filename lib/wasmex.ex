@@ -74,7 +74,9 @@ defmodule Wasmex do
 
       %{
         memory: %Wasmex.Memory{},
-        caller: %Wasmex.StoreOrCaller{}
+        caller: %Wasmex.StoreOrCaller{},
+        pid: pid(),
+        instance: %Wasmex.Instance{}
       } = context
 
   The `caller` MUST be used instead of a `store` in Wasmex API functions.
@@ -89,8 +91,58 @@ defmodule Wasmex do
 
   - `:i32` a 32 bit integer
   - `:i64` a 64 bit integer
+  - `:v128` a 128 bit unsigned integer
   - `:f32` a 32 bit float
   - `:f64` a 64 bit float
+
+  ### Linking multiple Wasm modules
+
+  Wasm module `links` may be given as an additional option.
+  Links is a map of module names to Wasm modules.
+
+      iex> calculator_wasm = File.read!(TestHelper.wasm_link_test_file_path())
+      iex> utils_wasm = File.read!(TestHelper.wasm_test_file_path())
+      iex> links = %{utils: %{bytes: utils_wasm}}
+      iex> {:ok, pid} = Wasmex.start_link(%{bytes: calculator_wasm, links: links})
+      iex> Wasmex.call_function(pid, "sum_range", [1, 5])
+      {:ok, [15]}
+
+  It is also possible to link an already compiled module.
+  This improves performance if the same module is used many times by compiling it only once.
+
+      iex> calculator_wasm = File.read!(TestHelper.wasm_link_test_file_path())
+      iex> utils_wasm = File.read!(TestHelper.wasm_test_file_path())
+      iex> {:ok, store} = Wasmex.Store.new()
+      iex> {:ok, utils_module} = Wasmex.Module.compile(store, utils_wasm)
+      iex> links = %{utils: %{module: utils_module}}
+      iex> {:ok, pid} = Wasmex.start_link(%{bytes: calculator_wasm, links: links, store: store})
+      iex> Wasmex.call_function(pid, "sum_range", [1, 5])
+      {:ok, [15]}
+
+  **Important:** Make sure to use the same store for the linked modules and the main module.
+
+  When linking multiple Wasm modules, it is important to handle their dependencies properly.
+  This can be achieved by providing a map of module names to their respective Wasm modules in the `links` option.
+
+  For example, if we have a main module that depends on a calculator module, and the calculator module depends on a utils module, we can link them as follows:
+
+      iex> main_wasm = File.read!(TestHelper.wasm_link_dep_test_file_path())
+      iex> calculator_wasm = File.read!(TestHelper.wasm_link_test_file_path())
+      iex> utils_wasm = File.read!(TestHelper.wasm_test_file_path())
+      iex> links = %{
+      ...>   calculator: %{
+      ...>     bytes: calculator_wasm,
+      ...>     links: %{
+      ...>       utils: %{bytes: utils_wasm}
+      ...>     }
+      ...>   }
+      ...> }
+      iex> {:ok, _pid} = Wasmex.start_link(%{bytes: main_wasm, links: links})
+
+  In this example, the `links` map specifies that the `calculator` module depends on the `utils` module.
+  The `links` map is a nested map, where each module name is associated with a map that contains the Wasm module bytes and its dependencies.
+
+  The `links` map can also be used to link an already compiled module, as shown in the previous examples.
 
   ### WASI
 
@@ -159,6 +211,9 @@ defmodule Wasmex do
   def start_link(%{} = opts) when not is_map_key(opts, :imports),
     do: start_link(Map.merge(opts, %{imports: %{}}))
 
+  def start_link(%{} = opts) when not is_map_key(opts, :links),
+    do: start_link(Map.merge(opts, %{links: %{}}))
+
   def start_link(%{} = opts) when is_map_key(opts, :module) and not is_map_key(opts, :store),
     do: {:error, :must_specify_store_used_to_compile_module}
 
@@ -182,13 +237,39 @@ defmodule Wasmex do
     end
   end
 
-  def start_link(%{store: store, module: module, imports: imports} = opts)
-      when is_map(imports) and not is_map_key(opts, :bytes) do
+  def start_link(%{links: links, store: store} = opts)
+      when is_map(links) and not is_map_key(opts, :compiled_links) do
+    compiled_links =
+      links
+      |> flatten_links()
+      |> Enum.reverse()
+      |> Enum.uniq_by(&elem(&1, 0))
+      |> Enum.map(&build_compiled_links(&1, store))
+
+    opts
+    |> Map.delete(:links)
+    |> Map.put(:compiled_links, compiled_links)
+    |> start_link()
+  end
+
+  def start_link(%{store: store, module: module, imports: imports, compiled_links: links} = opts)
+      when is_map(imports) and is_list(links) and not is_map_key(opts, :bytes) do
     GenServer.start_link(__MODULE__, %{
       store: store,
       module: module,
+      links: links,
       imports: stringify_keys(imports)
     })
+  end
+
+  defp flatten_links(links) do
+    Enum.flat_map(links, fn {name, opts} ->
+      if Map.has_key?(opts, :links) do
+        [{name, Map.drop(opts, [:links])} | flatten_links(opts.links)]
+      else
+        [{name, opts}]
+      end
+    end)
   end
 
   defp build_store(opts) do
@@ -197,6 +278,17 @@ defmodule Wasmex do
     else
       Wasmex.Store.new()
     end
+  end
+
+  defp build_compiled_links({name, %{bytes: bytes} = opts}, store)
+       when not is_map_key(opts, :module) do
+    with {:ok, module} <- Wasmex.Module.compile(store, bytes) do
+      %{name: stringify(name), module: module}
+    end
+  end
+
+  defp build_compiled_links({name, %{module: module}}, _store) do
+    %{name: stringify(name), module: module}
   end
 
   @doc ~S"""
@@ -347,10 +439,25 @@ defmodule Wasmex do
   @spec module(pid()) :: {:ok, Wasmex.Module.t()} | {:error, any()}
   def module(pid), do: GenServer.call(pid, {:module})
 
+  @doc ~S"""
+  Returns the `Wasmex.Instance` of the Wasm instance.
+
+  ## Example
+
+      iex> {:ok, pid} = Wasmex.start_link(%{bytes: File.read!(TestHelper.wasm_test_file_path())})
+      iex> {:ok, %Wasmex.Instance{}} = Wasmex.instance(pid)
+  """
+  @spec instance(pid()) :: {:ok, Wasmex.Instance.t()} | {:error, any()}
+  def instance(pid), do: GenServer.call(pid, {:instance})
+
   defp stringify_keys(struct) when is_struct(struct), do: struct
 
   defp stringify_keys(map) when is_map(map) do
     for {key, val} <- map, into: %{}, do: {stringify(key), stringify_keys(val)}
+  end
+
+  defp stringify_keys(list) when is_list(list) do
+    for val <- list, into: [], do: stringify_keys(val)
   end
 
   defp stringify_keys(value), do: value
@@ -361,8 +468,9 @@ defmodule Wasmex do
   # Server
 
   @impl true
-  def init(%{store: store, module: module, imports: imports} = state) when is_map(imports) do
-    case Wasmex.Instance.new(store, module, imports) do
+  def init(%{store: store, module: module, imports: imports, links: links} = state)
+      when is_map(imports) and is_list(links) do
+    case Wasmex.Instance.new(store, module, imports, links) do
       {:ok, instance} -> {:ok, Map.merge(state, %{instance: instance})}
       {:error, reason} -> {:error, reason}
     end
@@ -384,6 +492,11 @@ defmodule Wasmex do
   @impl true
   def handle_call({:module}, _from, %{module: module} = state) do
     {:reply, {:ok, module}, state}
+  end
+
+  @impl true
+  def handle_call({:instance}, _from, %{instance: instance} = state) do
+    {:reply, {:ok, instance}, state}
   end
 
   @impl true
@@ -415,14 +528,16 @@ defmodule Wasmex do
   @impl true
   def handle_info(
         {:invoke_callback, namespace_name, import_name, context, params, token},
-        %{imports: imports} = state
+        %{imports: imports, instance: instance} = state
       ) do
     context =
       Map.merge(
         context,
         %{
           memory: Wasmex.Memory.__wrap_resource__(Map.get(context, :memory)),
-          caller: Wasmex.StoreOrCaller.__wrap_resource__(Map.get(context, :caller))
+          caller: Wasmex.StoreOrCaller.__wrap_resource__(Map.get(context, :caller)),
+          pid: self(),
+          instance: instance
         }
       )
 

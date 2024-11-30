@@ -35,8 +35,10 @@ defmodule Wasmex.Instance do
   The `import` parameter is a nested map of Wasm namespaces.
   Each namespace consists of a name and a map of function names to function signatures.
 
+  The `links` parameter is a list of name-module pairs that are dynamically linked to the instance.
+
   Function signatures are a tuple of the form `{:fn, arg_types, return_types, callback}`.
-  Where `arg_types` and `return_types` are lists of `:i32`, `:i64`, `:f32`, `:f64`.
+  Where `arg_types` and `return_types` are lists of `:i32`, `:i64`, `:f32`, `:f64`, `:v128`.
 
   Each `callback` function receives a `context` map as the first argument followed by the arguments specified in its signature.
   `context` has the following keys:
@@ -61,17 +63,28 @@ defmodule Wasmex.Instance do
       ...>       "imported_void" => {:fn, [], [], fn _context -> nil end}
       ...>     }
       ...> }
-      iex> {:ok, %Wasmex.Instance{}} = Wasmex.Instance.new(store, module, imports)
+      ...> links = []
+      iex> {:ok, %Wasmex.Instance{}} = Wasmex.Instance.new(store, module, imports, links)
   """
-  @spec new(Wasmex.StoreOrCaller.t(), Wasmex.Module.t(), %{
-          optional(binary()) => (... -> any())
-        }) ::
+  @spec new(
+          Wasmex.StoreOrCaller.t(),
+          Wasmex.Module.t(),
+          %{optional(binary()) => (... -> any())},
+          [%{optional(binary()) => Wasmex.Module.t()}] | []
+        ) ::
           {:ok, __MODULE__.t()} | {:error, binary()}
-  def new(store_or_caller, module, imports) when is_map(imports) do
+  def new(store_or_caller, module, imports, links \\ [])
+      when is_map(imports) and is_list(links) do
     %Wasmex.StoreOrCaller{resource: store_or_caller_resource} = store_or_caller
     %Wasmex.Module{resource: module_resource} = module
 
-    case Wasmex.Native.instance_new(store_or_caller_resource, module_resource, imports) do
+    links =
+      links
+      |> Enum.map(fn %{name: name, module: module} ->
+        %{name: name, module_resource: module.resource}
+      end)
+
+    case Wasmex.Native.instance_new(store_or_caller_resource, module_resource, imports, links) do
       {:error, err} -> {:error, err}
       resource -> {:ok, __wrap_resource__(resource)}
     end
@@ -171,6 +184,75 @@ defmodule Wasmex.Instance do
           {:ok, Wasmex.Memory.t()} | {:error, binary()}
   def memory(store, instance) do
     Wasmex.Memory.from_instance(store, instance)
+  end
+
+  @doc ~S"""
+  Reads the value of an exported global.
+
+  ## Examples
+
+      iex> wat = "(module
+      ...>          (global $answer i32 (i32.const 42))
+      ...>          (export \"answer\" (global $answer))
+      ...>        )"
+      iex> {:ok, store} = Wasmex.Store.new()
+      iex> {:ok, module} = Wasmex.Module.compile(store, wat)
+      iex> {:ok, instance} = Wasmex.Instance.new(store, module, %{})
+      iex> Wasmex.Instance.get_global_value(store, instance, "answer")
+      {:ok, 42}
+      iex> Wasmex.Instance.get_global_value(store, instance, "not_a_global")
+      {:error, "exported global `not_a_global` not found"}
+  """
+  @spec get_global_value(Wasmex.StoreOrCaller.t(), __MODULE__.t(), binary()) ::
+          {:ok, number()} | {:error, binary()}
+  def get_global_value(store_or_caller, instance, global_name) do
+    %{resource: store_or_caller_resource} = store_or_caller
+    %__MODULE__{resource: instance_resource} = instance
+
+    Wasmex.Native.instance_get_global_value(
+      store_or_caller_resource,
+      instance_resource,
+      global_name
+    )
+    |> case do
+      {:error, _reason} = term -> term
+      result when is_number(result) -> {:ok, result}
+    end
+  end
+
+  @doc ~S"""
+  Sets the value of an exported mutable global.
+
+  ## Examples
+
+      iex> wat = "(module
+      ...>          (global $count (mut i32) (i32.const 0))
+      ...>          (export \"count\" (global $count))
+      ...>        )"
+      iex> {:ok, store} = Wasmex.Store.new()
+      iex> {:ok, module} = Wasmex.Module.compile(store, wat)
+      iex> {:ok, instance} = Wasmex.Instance.new(store, module, %{})
+      iex> Wasmex.Instance.set_global_value(store, instance, "count", 1)
+      :ok
+      iex> Wasmex.Instance.get_global_value(store, instance, "count")
+      {:ok, 1}
+  """
+  @spec set_global_value(Wasmex.StoreOrCaller.t(), __MODULE__.t(), binary(), number()) ::
+          {:ok, number()} | {:error, binary()}
+  def set_global_value(store_or_caller, instance, global_name, new_value) do
+    %{resource: store_or_caller_resource} = store_or_caller
+    %__MODULE__{resource: instance_resource} = instance
+
+    Wasmex.Native.instance_set_global_value(
+      store_or_caller_resource,
+      instance_resource,
+      global_name,
+      new_value
+    )
+    |> case do
+      {} -> :ok
+      {:error, _reason} = term -> term
+    end
   end
 end
 

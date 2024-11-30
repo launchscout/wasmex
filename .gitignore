@@ -24,7 +24,7 @@ wasmex-*.tar
 
 # Cargo things in the Rust part of this package
 priv/native/libwasmex.so
-test/wasm_source/target/*
+test/**/target/*
 
 .mix_tasks
 **/.DS_Store
@@ -32,10 +32,6 @@ test/wasm_source/target/*
 # Wapm test files
 wapm_packages/*
 wapm.lock
-
-# The PLT files for `dialyzer`
-/priv/plts/*.plt
-/priv/plts/*.plt.hash
 
 # ignore local builds
 checksum-Elixir.Wasmex.Native.exs

@@ -70,6 +70,7 @@ defmodule Wasmex.ModuleTest do
         "endless_loop" => {:fn, [], []},
         "f32_f32" => {:fn, [:f32], [:f32]},
         "f64_f64" => {:fn, [:f64], [:f64]},
+        "v128_v128" => {:fn, [:v128], [:v128]},
         "i32_i32" => {:fn, [:i32], [:i32]},
         "i32_i64_f32_f64_f64" => {:fn, [:i32, :i64, :f32, :f64], [:f64]},
         "i64_i64" => {:fn, [:i64], [:i64]},
@@ -77,7 +78,6 @@ defmodule Wasmex.ModuleTest do
         "string" => {:fn, [], [:i32]},
         "string_first_byte" => {:fn, [:i32, :i32], [:i32]},
         "sum" => {:fn, [:i32, :i32], [:i32]},
-        "to_string" => {:fn, [:i32], [:i32, :i32]},
         "void" => {:fn, [], []}
       }
 
@@ -88,9 +88,9 @@ defmodule Wasmex.ModuleTest do
       {:ok, store} = Wasmex.Store.new()
 
       {:ok, module} =
-        Wasmex.Module.compile(store, "(module (table (export \"myTable\") 2 anyfunc))")
+        Wasmex.Module.compile(store, "(module (table (export \"myTable\") 2 funcref))")
 
-      expected = %{"myTable" => {:table, %{minimum: 2, type: :func_ref}}}
+      expected = %{"myTable" => {:table, %{minimum: 2, type: {:reference, "(ref null func)"}}}}
       assert expected == Wasmex.Module.exports(module)
     end
 
@@ -140,10 +140,13 @@ defmodule Wasmex.ModuleTest do
       {:ok, module} =
         Wasmex.Module.compile(
           store,
-          "(module (table (import \"env\" \"myTable\") 2 anyfunc))"
+          "(module (table (import \"env\" \"myTable\") 2 funcref))"
         )
 
-      expected = %{"env" => %{"myTable" => {:table, %{minimum: 2, type: :func_ref}}}}
+      expected = %{
+        "env" => %{"myTable" => {:table, %{minimum: 2, type: {:reference, "(ref null func)"}}}}
+      }
+
       assert expected == Wasmex.Module.imports(module)
     end
 
@@ -182,7 +185,7 @@ defmodule Wasmex.ModuleTest do
         (import "env" "MyMemory" (memory (;0;) 256 256))
         (import "global" "Infinity" (global (;8;) f64))
         (import "global" "NaN" (global (;7;) f64))
-        (import "env" "MyTable" (table (;0;) 10 10 anyfunc))
+        (import "env" "MyTable" (table (;0;) 10 10 funcref))
       )
       """
 
@@ -192,7 +195,8 @@ defmodule Wasmex.ModuleTest do
       expected = %{
         "env" => %{
           "MyMemory" => {:memory, %{maximum: 256, minimum: 256, shared: false, memory64: false}},
-          "MyTable" => {:table, %{maximum: 10, minimum: 10, type: :func_ref}}
+          "MyTable" =>
+            {:table, %{maximum: 10, minimum: 10, type: {:reference, "(ref null func)"}}}
         },
         "global" => %{
           "Infinity" => {:global, %{mutability: :const, type: :f64}},

@@ -1,7 +1,7 @@
 defmodule Wasmex.MixProject do
   use Mix.Project
 
-  @version "0.8.3"
+  @version "0.9.2"
 
   def project do
     [
@@ -9,13 +9,11 @@ defmodule Wasmex.MixProject do
       version: @version,
       elixir: "~> 1.12",
       start_permanent: Mix.env() == :prod,
+      elixirc_paths: elixirc_paths(Mix.env()),
       name: "wasmex",
       description: description(),
       package: package(),
-      deps: deps(),
-      dialyzer: [
-        plt_file: {:no_warn, "priv/plts/dialyzer.plt"}
-      ]
+      deps: deps()
     ]
   end
 
@@ -29,17 +27,20 @@ defmodule Wasmex.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:rustler_precompiled, "~> 0.6.3"},
-      {:rustler, "~> 0.29.1"},
-      {:ex_doc, "~> 0.30.2", only: [:dev, :test]},
-      {:dialyxir, "~> 1.4.1", only: [:dev, :test], runtime: false},
-      {:credo, "~> 1.6", only: [:dev, :test], runtime: false}
+      {:rustler_precompiled, "~> 0.8"},
+      {:rustler, "~> 0.35.0"},
+      {:ex_doc, "~> 0.34.2", only: [:dev, :test]},
+      {:credo, "~> 1.7.10", only: [:dev, :test], runtime: false}
     ]
   end
 
   defp description() do
     "Wasmex is an Elixir library for executing WebAssembly binaries"
   end
+
+  # Specifies which paths to compile per environment.
+  defp elixirc_paths(:test), do: ["lib", "test/component_fixtures"]
+  defp elixirc_paths(_), do: ["lib"]
 
   defp package() do
     [

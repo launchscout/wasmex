@@ -66,6 +66,21 @@ defmodule WasmexTest do
                Wasmex.call_function(instance, "i64_i64", [3_000_000_000])
     end
 
+    test t(&Wasmex.call_function/3) <> " v128_v128(v128) -> v128 function", %{instance: instance} do
+      assert {:ok, [42]} == Wasmex.call_function(instance, :v128_v128, [42])
+
+      max_128_bit_int = 340_282_366_920_938_463_463_374_607_431_768_211_455
+
+      assert {:ok, [max_128_bit_int]} ==
+               Wasmex.call_function(instance, "v128_v128", [max_128_bit_int])
+
+      assert {:error, "Cannot convert argument #1 to a WebAssembly v128 value."} ==
+               Wasmex.call_function(instance, :v128_v128, [max_128_bit_int + 1])
+
+      assert {:error, "Cannot convert argument #1 to a WebAssembly v128 value."} ==
+               Wasmex.call_function(instance, :v128_v128, [-1])
+    end
+
     test t(&Wasmex.call_function/3) <> " f32_f32(f32) -> f32 function", %{instance: instance} do
       {:ok, [result]} = Wasmex.call_function(instance, :f32_f32, [3.14])
 
@@ -117,15 +132,6 @@ defmodule WasmexTest do
       {:ok, [pointer]} = Wasmex.call_function(instance, :string, [])
       {:ok, memory} = Wasmex.memory(instance)
       assert Wasmex.Memory.read_string(store, memory, pointer, 13) == "Hello, World!"
-    end
-
-    test t(&Wasmex.call_function/3) <> " to_string(i32) -> string function", %{
-      store: store,
-      instance: instance
-    } do
-      {:ok, [pointer, length]} = Wasmex.call_function(instance, :to_string, [54_321])
-      {:ok, memory} = Wasmex.memory(instance)
-      assert Wasmex.Memory.read_string(store, memory, pointer, length) == "54321"
     end
 
     test t(&Wasmex.call_function/3) <> " string_first_byte(string_pointer) -> u8 function", %{
@@ -260,12 +266,8 @@ defmodule WasmexTest do
     } do
       assert {:error, reason} = Wasmex.call_function(instance, "using_imported_sum3", [1, 2, 3])
 
-      expected_reason = """
-      Error during function excecution: `error while executing at wasm backtrace:
-          0:  0x12e - <unknown>!using_imported_sum3`.
-      """
-
-      assert reason =~ String.trim(expected_reason)
+      assert reason =~
+               ~r/Error during function excecution: `error while executing at wasm backtrace:\n\s*0:\s*0x.* - .*\!using_imported_sum3`\./
     end
   end
 
@@ -303,7 +305,7 @@ defmodule WasmexTest do
       assert {:error, reason} = Wasmex.call_function(pid, :divide, [1, 0])
 
       # contains source file and line number
-      assert reason =~ "wasmex/test/wasm_test/src/lib.rs:67:5"
+      assert reason =~ "wasm_test/src/lib.rs:75:5"
     end
   end
 
@@ -313,15 +315,15 @@ defmodule WasmexTest do
       {:ok, store} = Wasmex.Store.new(nil, engine)
       bytes = File.read!(TestHelper.wasm_test_file_path())
       pid = start_supervised!({Wasmex, %{store: store, bytes: bytes}})
-      Wasmex.StoreOrCaller.add_fuel(store, 2)
+      Wasmex.StoreOrCaller.set_fuel(store, 2)
 
       assert Wasmex.call_function(pid, :void, []) == {:ok, []}
-      assert Wasmex.StoreOrCaller.fuel_remaining(store) == {:ok, 1}
+      assert Wasmex.StoreOrCaller.get_fuel(store) == {:ok, 1}
 
       assert {:error, err_msg} = Wasmex.call_function(pid, :void, [])
 
       assert err_msg =~
-               ~r/Error during function excecution: `error while executing at wasm backtrace:\n.+0:.+0x.+ - \<unknown\>\!void`\./
+               ~r/Error during function excecution: `error while executing at wasm backtrace:\n.+0:.+0x.+ - .*\!void`\./
     end
   end
 
@@ -414,6 +416,54 @@ defmodule WasmexTest do
 
       {:ok, memory} = Wasmex.memory(pid)
       assert Wasmex.Memory.read_string(store, memory, string_ptr, length) == "Hello World!"
+    end
+  end
+
+  describe "call exported function in imported function callback" do
+    test "using instance in callback" do
+      wat = """
+      (module
+        (func $add_import (import "env" "add_import") (param i32 i32) (result i32))
+
+        (func $call_import (export "call_import") (param i32 i32) (result i32)
+          (call $add_import (local.get 0) (local.get 1))
+        )
+
+        (func $call_add (export "call_add") (param i32 i32) (result i32)
+          local.get 0
+          local.get 1
+          i32.add
+        )
+      )
+      """
+
+      imports = %{
+        env: %{
+          add_import:
+            {:fn, [:i32, :i32], [:i32],
+             fn %{instance: instance, caller: caller}, a, b ->
+               Wasmex.Instance.call_exported_function(caller, instance, "call_add", [a, b], :from)
+
+               receive do
+                 {
+                   :returned_function_call,
+                   {:ok, [result]},
+                   :from
+                 } ->
+                   :ok
+                   result
+               after
+                 1000 ->
+                   raise "timeout on exported function call"
+               end
+             end}
+        }
+      }
+
+      {:ok, store} = Wasmex.Store.new()
+      {:ok, module} = Wasmex.Module.compile(store, wat)
+      pid = start_supervised!({Wasmex, %{store: store, module: module, imports: imports}})
+      assert Wasmex.call_function(pid, :call_import, [1, 2]) == {:ok, [3]}
     end
   end
 end

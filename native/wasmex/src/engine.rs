@@ -1,9 +1,4 @@
-// Due to a clippy bug it thinks we needlessly borrow stuff
-// when defining the ExStoreLimits struct
-// see: https://github.com/rust-lang/rust-clippy/issues/9778
-#![allow(clippy::needless_borrow)]
-
-use rustler::{resource::ResourceArc, types::Binary, Error, OwnedBinary};
+use rustler::{Binary, Error, NifStruct, OwnedBinary, Resource, ResourceArc};
 use std::ops::Deref;
 use std::sync::Mutex;
 use wasmtime::{Config, Engine, WasmBacktraceDetails};
@@ -16,7 +11,12 @@ pub struct ExEngineConfig {
     consume_fuel: bool,
     wasm_backtrace_details: bool,
     cranelift_opt_level: rustler::Atom,
+    memory64: bool,
+    wasm_component_model: bool,
 }
+
+#[rustler::resource_impl()]
+impl Resource for EngineResource {}
 
 pub struct EngineResource {
     pub inner: Mutex<Engine>,
@@ -68,6 +68,8 @@ pub(crate) fn engine_config(engine_config: ExEngineConfig) -> Config {
     config.consume_fuel(engine_config.consume_fuel);
     config.wasm_backtrace_details(backtrace_details);
     config.cranelift_opt_level(cranelift_opt_level);
+    config.wasm_memory64(engine_config.memory64);
+    config.wasm_component_model(engine_config.wasm_component_model);
     config
 }
 
